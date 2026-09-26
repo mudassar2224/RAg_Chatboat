@@ -9,7 +9,9 @@ newer dump)::
 
     uv run python -m db.build
 """
+import os
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -91,35 +93,46 @@ def _rows_from_insert(insert_sql: str) -> list[list]:
     return [[_literal_value(v) for v in tup.expressions] for tup in tree.find_all(exp.Tuple)]
 
 
-def build() -> None:
+def build(snapshot_path: str | Path = SNAPSHOT_PATH) -> None:
     dump_text = Path(DUMP_PATH).read_text(encoding="utf-8")
     creates, inserts = _extract_statements(dump_text)
     if not creates:
         raise RuntimeError(f"No CREATE TABLE statements found in {DUMP_PATH} — is this the right file?")
 
-    Path("data").mkdir(exist_ok=True)
-    con = duckdb.connect(SNAPSHOT_PATH)
+    target = Path(snapshot_path)
+    target.parent.mkdir(exist_ok=True)
+    # Build away from the live file. Streamlit can run multiple sessions at
+    # startup; readers must never see DuckDB while its catalog is changing.
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    con = duckdb.connect(str(temporary))
 
-    for table, create_sql in creates.items():
-        columns = _columns_from_create(create_sql)
-        col_defs = ", ".join(f'"{name}" {dtype}' for name, dtype in columns)
-        con.execute(f'CREATE OR REPLACE TABLE main."{table}" ({col_defs})')
+    try:
+        for table, create_sql in creates.items():
+            columns = _columns_from_create(create_sql)
+            col_defs = ", ".join(f'"{name}" {dtype}' for name, dtype in columns)
+            con.execute(f'CREATE OR REPLACE TABLE main."{table}" ({col_defs})')
 
-        if table not in inserts:
-            continue
-        rows = _rows_from_insert(inserts[table])
-        if not rows:
-            continue
-        placeholders = ", ".join("?" for _ in columns)
-        con.executemany(f'INSERT INTO main."{table}" VALUES ({placeholders})', rows)
+            if table not in inserts:
+                continue
+            rows = _rows_from_insert(inserts[table])
+            if not rows:
+                continue
+            placeholders = ", ".join("?" for _ in columns)
+            con.executemany(f'INSERT INTO main."{table}" VALUES ({placeholders})', rows)
 
-    _apply_fixes(con)
+        _apply_fixes(con)
 
-    con.execute("CREATE OR REPLACE TABLE main._meta (synced_at TIMESTAMP, source VARCHAR)")
-    con.execute("INSERT INTO main._meta VALUES (?, ?)", [datetime.now(timezone.utc), DUMP_PATH])
+        con.execute("CREATE OR REPLACE TABLE main._meta (synced_at TIMESTAMP, source VARCHAR)")
+        con.execute("INSERT INTO main._meta VALUES (?, ?)", [datetime.now(timezone.utc), DUMP_PATH])
+    finally:
+        con.close()
 
-    con.close()
-    print(f"Built {len(creates)} tables into {SNAPSHOT_PATH} from {DUMP_PATH}")
+    try:
+        os.replace(temporary, target)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    print(f"Built {len(creates)} tables into {target} from {DUMP_PATH}")
 
 
 def _apply_fixes(con: duckdb.DuckDBPyConnection) -> None:

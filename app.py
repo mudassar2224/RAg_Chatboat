@@ -25,6 +25,7 @@ def get_connection(snapshot_signature: tuple[int, int]):
     return duckdb.connect(SNAPSHOT_PATH, read_only=True)
 
 
+@st.cache_resource
 def ensure_snapshot():
     if not Path(DUMP_PATH).exists():
         st.error(f"`{DUMP_PATH}` is missing — the app has no data to build from.")
