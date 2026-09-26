@@ -1,0 +1,9 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Generated from data/db_sfms.sql by db/build.py — rebuilt automatically,
+# no need to version it. The .sql dump itself IS committed (see below).
+data/snapshot.duckdb
